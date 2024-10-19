@@ -1,3 +1,5 @@
-fn main() {
-    println!("Hello, World");
+use anyhow::Error;
+
+fn main() -> Result<(), Error>{
+    robusta::run()
 }
