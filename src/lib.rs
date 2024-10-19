@@ -1,31 +1,47 @@
 use anyhow::{anyhow, format_err, Error};
-use std::env::current_dir;
+use std::collections::HashMap;
+use std::env::{args, current_dir};
 use std::fs;
 use std::fs::File;
 use std::io::Read;
+use std::rc::Rc;
 use zip::read::ZipFile;
 use zip::ZipArchive;
 
 pub fn run() -> Result<(), Error> {
+    let mut classes = HashMap::new();
+
     let jar_dir = current_dir()?.join("data");
 
     for path in fs::read_dir(jar_dir)? {
         let path = path?.path();
         let zip_reader = File::open(path)?;
-        let mut zip_arch = ZipArchive::new(zip_reader)?;
+        let mut zip_Rch = ZipArchive::new(zip_reader)?;
 
-        let class_files: Vec<String> = zip_arch.file_names()
+        let class_files: Vec<String> = zip_Rch.file_names()
             .filter(|file| file.ends_with(".class"))
             .map(|str| str.to_string())
             .collect();
 
         for file in class_files {
-            let file_name = &file;
-            let file = zip_arch.by_name(&file)?;
+            let file = zip_Rch.by_name(&file)?;
             let class_file = read_class_file(file)?;
-            println!("class file of {} is {:?}", file_name, class_file);
+            println!("class file {:?}", &class_file);
+
+            insert_class(&mut classes, class_file)?;
         }
     }
+
+    println!("Ready to run");
+
+    let main_class_name = args().nth(1).ok_or(anyhow!("required main class"))?;
+    let main_class = classes.get(&main_class_name).ok_or(anyhow!("unknown class {}", main_class_name))?;
+
+    let main_method = main_class.methods.iter()
+        .find(|method| method.name.eq("main") && method.descriptor.eq("([Ljava/lang/String;)V"))
+        .ok_or(anyhow!("can't find main method"))?;
+
+    println!("got main method {:?}", main_method.code.code);
 
     Ok(())
 }
@@ -113,15 +129,22 @@ fn read_class_file(mut file: ZipFile) -> Result<ClassFile, Error> {
                     method.code.max_stack = max_stack;
                     method.code.max_locals = max_locals;
                     method.code.code = code;
+                } else {
+                    let length = read_u32(&mut file)?;
+                    read_length(&mut file, length as usize)?;
                 }
             } else {
                 return Err(format_err!("expected utf8"));
             }
-
-            let length = read_u32(&mut file)?;
-            read_length(&mut file, length as usize)?;
         }
         class_file.methods.push(method);
+    }
+
+    let attribute_count = read_u16(&mut file)?; // attribute count
+    for _ in 0..attribute_count {
+        read_u16(&mut file)?; // name index
+        let length = read_u32(&mut file)?;
+        read_length(&mut file, length as usize)?;
     }
 
     Ok(class_file)
@@ -212,4 +235,64 @@ fn read_const(file: &mut ZipFile) -> Result<Const, Error> {
         }
         _ => Err(anyhow!("Unimplemented tag {}", tag))
     }
+}
+
+#[derive(Debug)]
+struct RuntimeClass {
+    this_class: String,
+    super_class: Option<Rc<RuntimeClass>>,
+    methods: Vec<Method2>,
+}
+
+#[derive(Debug)]
+struct Method2 {
+    name: String,
+    descriptor: String,
+    code: Code,
+}
+
+fn insert_class(classes: &mut HashMap<String, Rc<RuntimeClass>>, class_file: ClassFile) -> Result<Rc<RuntimeClass>, Error> {
+    let class_name = class_file.const_pool.get((class_file.this_class - 1) as usize).ok_or(anyhow!("error"))?;
+
+    let class_name = match class_name {
+        Const::Class { name_idx } => {
+            let class_name = class_file.const_pool.get((name_idx.clone() - 1) as usize).ok_or(anyhow!("error"))?;
+            match class_name {
+                Const::Utf8 { bytes } => bytes,
+                _ => return Err(anyhow!("expected utf8, not {:?}", class_name))
+            }
+        }
+        _ => return Err(anyhow!("expected class, not {:?}", class_name))
+    };
+
+    let mut methods = Vec::with_capacity(class_file.methods.len());
+    for method in class_file.methods {
+        let name = class_file.const_pool.get((method.name_idx - 1) as usize).ok_or(anyhow!("error"))?;
+        let name = match name {
+            Const::Utf8 { bytes } => bytes,
+            _ => return Err(anyhow!("error"))
+        };
+
+        let descriptor = class_file.const_pool.get((method.descriptor_idx - 1) as usize).ok_or(anyhow!("error"))?;
+        let descriptor = match descriptor {
+            Const::Utf8 { bytes } => bytes,
+            _ => return Err(anyhow!("error"))
+        };
+
+        methods.push(Method2 {
+            name: name.to_string(),
+            descriptor: descriptor.to_string(),
+            code: method.code,
+        });
+    }
+
+    let class = Rc::new(RuntimeClass {
+        this_class: class_name.to_string(),
+        super_class: None,
+        methods: methods,
+    });
+
+    classes.insert(class.this_class.clone(), class.clone());
+
+    Ok(class)
 }
