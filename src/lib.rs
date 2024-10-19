@@ -16,23 +16,20 @@ pub fn run() -> Result<(), Error> {
     for path in fs::read_dir(jar_dir)? {
         let path = path?.path();
         let zip_reader = File::open(path)?;
-        let mut zip_Rch = ZipArchive::new(zip_reader)?;
+        let mut zip_archive = ZipArchive::new(zip_reader)?;
 
-        let class_files: Vec<String> = zip_Rch.file_names()
+        let class_files: Vec<String> = zip_archive.file_names()
             .filter(|file| file.ends_with(".class"))
             .map(|str| str.to_string())
             .collect();
 
         for file in class_files {
-            let file = zip_Rch.by_name(&file)?;
+            let file = zip_archive.by_name(&file)?;
             let class_file = read_class_file(file)?;
-            println!("class file {:?}", &class_file);
 
             insert_class(&mut classes, class_file)?;
         }
     }
-
-    println!("Ready to run");
 
     let main_class_name = args().nth(1).ok_or(anyhow!("required main class"))?;
     let main_class = classes.get(&main_class_name).ok_or(anyhow!("unknown class {}", main_class_name))?;
@@ -41,7 +38,9 @@ pub fn run() -> Result<(), Error> {
         .find(|method| method.name.eq("main") && method.descriptor.eq("([Ljava/lang/String;)V"))
         .ok_or(anyhow!("can't find main method"))?;
 
-    println!("got main method {:?}", main_method.code.code);
+    let mut thread = create_thread(main_method);
+
+    run_thread(&mut thread)?;
 
     Ok(())
 }
@@ -240,7 +239,6 @@ fn read_const(file: &mut ZipFile) -> Result<Const, Error> {
 #[derive(Debug)]
 struct RuntimeClass {
     this_class: String,
-    super_class: Option<Rc<RuntimeClass>>,
     methods: Vec<Method2>,
 }
 
@@ -288,11 +286,44 @@ fn insert_class(classes: &mut HashMap<String, Rc<RuntimeClass>>, class_file: Cla
 
     let class = Rc::new(RuntimeClass {
         this_class: class_name.to_string(),
-        super_class: None,
-        methods: methods,
+        methods,
     });
 
-    classes.insert(class.this_class.clone(), class.clone());
+    classes.insert(class.this_class.clone().replace("/", "."), class.clone());
 
     Ok(class)
+}
+
+struct Thread {
+    frames: Vec<Frame>,
+}
+
+struct Frame {
+    pc: usize,
+    code: Vec<u8>,
+}
+
+fn create_thread(method: &Method2) -> Thread {
+    Thread {
+        frames: vec![Frame {
+            pc: 0,
+            code: method.code.code.clone(),
+        }],
+    }
+}
+
+fn run_thread(thread: &mut Thread) -> Result<(), Error> {
+    while let Some(frame) = thread.frames.last_mut() {
+        while frame.pc < frame.code.len() {
+            let instr = frame.code[frame.pc];
+            match instr {
+                0xB1 => {
+                    thread.frames.pop();
+                    break;
+                }
+                _ => Err(anyhow!("unknown instruction {:#02x}", instr))?
+            }
+        }
+    }
+    Ok(())
 }
