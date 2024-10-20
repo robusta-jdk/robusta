@@ -1,194 +1,237 @@
+use anyhow::{anyhow, Error};
+use std::collections::HashMap;
 use std::io::Read;
-use anyhow::{anyhow, format_err, Error};
-use zip::read::ZipFile;
 
-pub fn read_class_file(mut file: ZipFile) -> Result<ClassFile, Error> {
-    let mut class_file = ClassFile {
-        const_pool: vec![],
-        this_class: 0,
-        super_class: 0,
-        methods: vec![],
-    };
+impl ClassFile {
+    pub fn read_from<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        // Skip unused fields
+        read_length(reader, 8)?;
 
-    read_u32(&mut file)?; // magic
-    read_u16(&mut file)?; // minor
-    read_u16(&mut file)?; // major
+        let const_pool = ConstPool::from_reader(reader)?;
 
-    let const_pool_count = read_u16(&mut file)?;
-    class_file.const_pool = Vec::with_capacity(const_pool_count as usize);
-    for _ in 1..const_pool_count {
-        class_file.const_pool.push(read_const(&mut file)?);
-    }
+        read_u16(reader)?; // access flags
+        let this_class = read_u16(reader)?;
+        read_u16(reader)?; // super class
 
-    read_u16(&mut file)?; // access flags
-    class_file.this_class = read_u16(&mut file)?;
-    class_file.super_class = read_u16(&mut file)?;
-
-    let interface_count = read_u16(&mut file)?;
-    for _ in 0..interface_count {
-        read_u16(&mut file)?; // interface
-    }
-
-    let field_count = read_u16(&mut file)?;
-    for _ in 0..field_count {
-        read_u16(&mut file)?; // access flags
-        read_u16(&mut file)?; // name index
-        read_u16(&mut file)?; // descriptor index
-        let attribute_count = read_u16(&mut file)?; // attribute count
-        for _ in 0..attribute_count {
-            read_u16(&mut file)?; // name index
-            let length = read_u32(&mut file)?;
-            read_length(&mut file, length as usize)?;
+        let interface_count = read_u16(reader)?;
+        for _ in 0..interface_count {
+            read_u16(reader)?; // interface
         }
-    }
 
-    let method_count = read_u16(&mut file)?;
-    class_file.methods = Vec::with_capacity(method_count as usize);
-    for _ in 0..method_count {
-        let mut method = Method {
-            name_idx: 0,
-            descriptor_idx: 0,
-            code: Code {
-                max_stack: 0,
-                max_locals: 0,
-                code: vec![],
-            },
-        };
-
-        read_u16(&mut file)?; // access flags
-        method.name_idx = read_u16(&mut file)?;
-        method.descriptor_idx = read_u16(&mut file)?;
-
-        let attribute_count = read_u16(&mut file)?;
-        for _ in 0..attribute_count {
-            let name_idx = read_u16(&mut file)?;
-
-            let const_item = class_file.const_pool.get((name_idx - 1) as usize).ok_or(format_err!("expected const pool item"))?;
-            if let Const::Utf8 { bytes } = const_item {
-                if bytes.eq("Code") {
-                    read_u32(&mut file)?; // length
-                    let max_stack = read_u16(&mut file)?;
-                    let max_locals = read_u16(&mut file)?;
-                    let code_length = read_u32(&mut file)?;
-                    let code = read_length(&mut file, code_length as usize)?;
-
-                    // ex table
-                    let ex_length = read_u16(&mut file)?;
-                    read_length(&mut file, ex_length as usize * 8)?;
-
-                    let attribute_count = read_u16(&mut file)?; // attribute count
-                    for _ in 0..attribute_count {
-                        read_u16(&mut file)?; // name index
-                        let length = read_u32(&mut file)?;
-                        read_length(&mut file, length as usize)?;
-                    }
-                    method.code.max_stack = max_stack;
-                    method.code.max_locals = max_locals;
-                    method.code.code = code;
-                } else {
-                    let length = read_u32(&mut file)?;
-                    read_length(&mut file, length as usize)?;
-                }
-            } else {
-                return Err(format_err!("expected utf8"));
+        let field_count = read_u16(reader)?;
+        for _ in 0..field_count {
+            read_u16(reader)?; // access flags
+            read_u16(reader)?; // name index
+            read_u16(reader)?; // descriptor index
+            let attribute_count = read_u16(reader)?; // attribute count
+            for _ in 0..attribute_count {
+                read_u16(reader)?; // name index
+                let length = read_u32(reader)?;
+                read_length(reader, length as usize)?;
             }
         }
-        class_file.methods.push(method);
-    }
 
-    let attribute_count = read_u16(&mut file)?; // attribute count
-    for _ in 0..attribute_count {
-        read_u16(&mut file)?; // name index
-        let length = read_u32(&mut file)?;
-        read_length(&mut file, length as usize)?;
-    }
+        let method_count = read_u16(reader)?;
+        let mut methods = Vec::with_capacity(method_count as usize);
+        for _ in 0..method_count {
+            methods.push(Method::from_reader(reader)?);
+        }
 
-    Ok(class_file)
+        let attribute_count = read_u16(reader)?; // attribute count
+        let mut attributes = Vec::with_capacity(attribute_count as usize);
+        for _ in 0..attribute_count {
+            attributes.push(Attribute::from_reader(reader)?);
+        }
+
+        Ok(ClassFile {
+            const_pool,
+            this_class,
+            methods,
+            _attributes: attributes,
+        })
+    }
 }
 
 #[derive(Debug)]
 pub struct ClassFile {
-    pub const_pool: Vec<Const>,
+    pub const_pool: ConstPool,
     pub this_class: u16,
-    pub super_class: u16,
     pub methods: Vec<Method>,
+    pub _attributes: Vec<Attribute>,
+}
+
+#[derive(Debug)]
+pub struct ConstPool {
+    consts: HashMap<u16, Const>,
+}
+
+impl ConstPool {
+    fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let const_pool_count = read_u16(reader)?;
+        let mut pool = HashMap::with_capacity(const_pool_count as usize - 1);
+        for idx in 1..const_pool_count {
+            pool.insert(idx, read_const(reader)?);
+        }
+        Ok(ConstPool { consts: pool })
+    }
+
+    pub fn get_utf8(&self, idx: u16) -> Result<&Utf8, Error> {
+        let const_item = self.consts.get(&idx).ok_or(anyhow!("const pool does not have item at index {}", idx))?;
+        match const_item {
+            Const::Utf8(utf8) => Ok(utf8),
+            _ => Err(anyhow!("expected utf8, got {:?}", const_item))
+        }
+    }
+
+    pub fn get_class(&self, idx: u16) -> Result<&Class, Error> {
+        let const_item = self.consts.get(&idx).ok_or(anyhow!("const pool does not have item at index {}", idx))?;
+        match const_item {
+            Const::Class(class) => Ok(class),
+            _ => Err(anyhow!("expected class, got {:?}", const_item))
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum Const {
-    Utf8 { bytes: String },
-    Class { name_idx: u16 },
+    Utf8(Utf8),
+    Class(Class),
     Unimplemented,
+}
+
+#[derive(Debug)]
+pub struct Utf8 {
+    pub bytes: String,
+}
+
+#[derive(Debug)]
+pub struct Class {
+    pub name_idx: u16,
 }
 
 #[derive(Debug)]
 pub struct Method {
     pub name_idx: u16,
     pub descriptor_idx: u16,
-    pub code: Code,
+    pub attributes: Vec<Attribute>,
+}
+
+impl Method {
+    fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let _access_flags = read_u16(reader)?;
+        let name_idx = read_u16(reader)?;
+        let descriptor_idx = read_u16(reader)?;
+        let attributes_count = read_u16(reader)?;
+        let mut attributes = Vec::with_capacity(attributes_count as usize);
+        for _ in 0..attributes_count {
+            attributes.push(Attribute::from_reader(reader)?);
+        }
+        Ok(Self { name_idx, descriptor_idx, attributes })
+    }
+}
+
+#[derive(Debug)]
+pub struct Attribute {
+    pub name_idx: u16,
+    pub info: Vec<u8>,
+}
+
+impl Attribute {
+    fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let name_idx = read_u16(reader)?;
+        let length = read_u32(reader)?;
+        let info = read_length(reader, length as usize)?;
+        Ok(Self { name_idx, info })
+    }
 }
 
 #[derive(Debug)]
 pub struct Code {
-    pub max_stack: u16,
-    pub max_locals: u16,
+    pub _max_stack: u16,
+    pub _max_locals: u16,
     pub code: Vec<u8>,
 }
 
-fn read_u8(file: &mut ZipFile) -> Result<u8, Error> {
+impl Code {
+    pub fn read_from<R: Read>(reader: &mut R) -> Result<Self, Error> {
+        let max_stack = read_u16(reader)?;
+        let max_locals = read_u16(reader)?;
+        let code_length = read_u32(reader)?;
+        let code = read_length(reader, code_length as usize)?;
+        let ex_table_length = read_u16(reader)?;
+        let _ex_table = read_length(reader, ex_table_length as usize * 8)?;
+        let attributes_length = read_u16(reader)?;
+        for _ in 0..attributes_length {
+            Attribute::from_reader(reader)?;
+        }
+        Ok(Self { _max_stack: max_stack, _max_locals: max_locals, code })
+    }
+}
+
+fn read_u8<R: Read>(reader: &mut R) -> Result<u8, Error> {
     let mut bytes = [0; 1];
-    file.read(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(bytes[0])
 }
 
-fn read_u32(file: &mut ZipFile) -> Result<u32, Error> {
+fn read_u32<R: Read>(reader: &mut R) -> Result<u32, Error> {
     let mut bytes = [0; 4];
-    file.read(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(u32::from_be_bytes(bytes))
 }
 
-fn read_u16(file: &mut ZipFile) -> Result<u16, Error> {
+fn read_u16<R: Read>(reader: &mut R) -> Result<u16, Error> {
     let mut bytes = [0; 2];
-    file.read(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(u16::from_be_bytes(bytes))
 }
 
-fn read_length(file: &mut ZipFile, length: usize) -> Result<Vec<u8>, Error> {
+fn read_length<R: Read>(reader: &mut R, length: usize) -> Result<Vec<u8>, Error> {
     let mut bytes = vec![0; length];
-    file.read(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(bytes)
 }
 
-fn read_const(file: &mut ZipFile) -> Result<Const, Error> {
-    let tag = read_u8(file)?;
+fn read_const<R: Read>(reader: &mut R) -> Result<Const, Error> {
+    let tag = read_u8(reader)?;
     match tag {
         1 => {
-            let length = read_u16(file)?;
-            let bytes = read_length(file, length as usize)?;
-            Ok(Const::Utf8 { bytes: String::from_utf8(bytes)? })
-        }
-        5 | 6 => {
-            read_u32(file)?;
-            read_u32(file)?;
-            Ok(Const::Unimplemented)
+            let length = read_u16(reader)?;
+            let bytes = read_length(reader, length as usize)?;
+            Ok(Const::Utf8(Utf8 { bytes: String::from_utf8(bytes)? }))
         }
         7 => {
-            let name_idx = read_u16(file)?;
-            Ok(Const::Class { name_idx })
+            let name_idx = read_u16(reader)?;
+            Ok(Const::Class(Class { name_idx }))
         }
-        8 | 16 => {
-            read_u16(file)?;
-            Ok(Const::Unimplemented)
-        }
-        3 | 4 | 9 | 10 | 11 | 12 | 18 => {
-            read_u32(file)?;
-            Ok(Const::Unimplemented)
-        }
-        15 => {
-            read_u8(file)?;
-            read_u16(file)?;
+        10 | 12 => {
+            read_u32(reader)?;
             Ok(Const::Unimplemented)
         }
         _ => Err(anyhow!("Unimplemented tag {}", tag))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_read_bytes_ok() {
+        let bytes = vec![0x10, 0x20, 0x30, 0x40, 0x50];
+
+        assert_eq!(read_u8(&mut Cursor::new(&bytes)).ok(), Some(0x10));
+        assert_eq!(read_u16(&mut Cursor::new(&bytes)).ok(), Some(0x1020));
+        assert_eq!(read_u32(&mut Cursor::new(&bytes)).ok(), Some(0x10203040));
+        assert_eq!(read_length(&mut Cursor::new(&bytes), 3).ok(), Some(vec![0x10, 0x20, 0x30]));
+    }
+
+    #[test]
+    fn test_read_bytes_error() {
+        assert!(read_u8(&mut Cursor::new([])).is_err());
+        assert!(read_u16(&mut Cursor::new([])).is_err());
+        assert!(read_u32(&mut Cursor::new([])).is_err());
+        assert!(read_length(&mut Cursor::new([]), 10).is_err());
     }
 }

@@ -5,8 +5,10 @@ use std::collections::HashMap;
 use std::env::{args, current_dir};
 use std::fs;
 use std::fs::File;
+use std::io::Cursor;
 use std::rc::Rc;
 use zip::ZipArchive;
+use crate::class_file::{ClassFile, Code};
 
 pub fn run() -> Result<(), Error> {
     let mut classes = HashMap::new();
@@ -24,9 +26,8 @@ pub fn run() -> Result<(), Error> {
             .collect();
 
         for file in class_files {
-            let file = zip_archive.by_name(&file)?;
-            let class_file = class_file::read_class_file(file)?;
-
+            let mut file = zip_archive.by_name(&file)?;
+            let class_file = ClassFile::read_from(&mut file)?;
             insert_class(&mut classes, class_file)?;
         }
     }
@@ -59,42 +60,40 @@ struct Method2 {
 }
 
 fn insert_class(classes: &mut HashMap<String, Rc<RuntimeClass>>, class_file: class_file::ClassFile) -> Result<Rc<RuntimeClass>, Error> {
-    let class_name = class_file.const_pool.get((class_file.this_class - 1) as usize).ok_or(anyhow!("error"))?;
-
-    let class_name = match class_name {
-        class_file::Const::Class { name_idx } => {
-            let class_name = class_file.const_pool.get((name_idx.clone() - 1) as usize).ok_or(anyhow!("error"))?;
-            match class_name {
-                class_file::Const::Utf8 { bytes } => bytes,
-                _ => return Err(anyhow!("expected utf8, not {:?}", class_name))
-            }
-        }
-        _ => return Err(anyhow!("expected class, not {:?}", class_name))
-    };
+    let this_class = class_file.const_pool.get_class(class_file.this_class)?;
+    let class_name = class_file.const_pool.get_utf8(this_class.name_idx)?;
 
     let mut methods = Vec::with_capacity(class_file.methods.len());
     for method in class_file.methods {
-        let name = class_file.const_pool.get((method.name_idx - 1) as usize).ok_or(anyhow!("error"))?;
-        let name = match name {
-            class_file::Const::Utf8 { bytes } => bytes,
-            _ => return Err(anyhow!("error"))
-        };
+        let name = class_file.const_pool.get_utf8(method.name_idx)?;
+        let descriptor = class_file.const_pool.get_utf8(method.descriptor_idx)?;
 
-        let descriptor = class_file.const_pool.get((method.descriptor_idx - 1) as usize).ok_or(anyhow!("error"))?;
-        let descriptor = match descriptor {
-            class_file::Const::Utf8 { bytes } => bytes,
-            _ => return Err(anyhow!("error"))
+        let code_attr = method.attributes.iter().find(|attr| {
+            class_file.const_pool.get_utf8(attr.name_idx).ok().map(|name_const| {
+                name_const.bytes.eq("Code")
+            }).unwrap_or_else(|| false)
+        });
+
+        let code = if let Some(code_attr) = code_attr {
+            let mut reader = Cursor::new(&code_attr.info);
+            Code::read_from(&mut reader)?
+        } else {
+            Code {
+                _max_stack: 0,
+                _max_locals: 0,
+                code: vec![],
+            }
         };
 
         methods.push(Method2 {
-            name: name.to_string(),
-            descriptor: descriptor.to_string(),
-            code: method.code,
+            name: name.bytes.clone(),
+            descriptor: descriptor.bytes.clone(),
+            code,
         });
     }
 
     let class = Rc::new(RuntimeClass {
-        this_class: class_name.to_string(),
+        this_class: class_name.bytes.clone(),
         methods,
     });
 
