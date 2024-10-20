@@ -1,5 +1,6 @@
 mod class_file;
 
+use crate::class_file::{ClassFile, Code};
 use anyhow::{anyhow, Error};
 use std::collections::HashMap;
 use std::env::{args, current_dir};
@@ -8,7 +9,6 @@ use std::fs::File;
 use std::io::Cursor;
 use std::rc::Rc;
 use zip::ZipArchive;
-use crate::class_file::{ClassFile, Code};
 
 pub fn run() -> Result<(), Error> {
     let mut classes = HashMap::new();
@@ -49,17 +49,18 @@ pub fn run() -> Result<(), Error> {
 #[derive(Debug)]
 struct RuntimeClass {
     this_class: String,
-    methods: Vec<Method2>,
+    methods: Vec<RuntimeMethod>,
 }
 
+// Need to think about how we name this
 #[derive(Debug)]
-struct Method2 {
+struct RuntimeMethod {
     name: String,
     descriptor: String,
-    code: class_file::Code,
+    code: Code,
 }
 
-fn insert_class(classes: &mut HashMap<String, Rc<RuntimeClass>>, class_file: class_file::ClassFile) -> Result<Rc<RuntimeClass>, Error> {
+fn insert_class(classes: &mut HashMap<String, Rc<RuntimeClass>>, class_file: ClassFile) -> Result<Rc<RuntimeClass>, Error> {
     let this_class = class_file.const_pool.get_class(class_file.this_class)?;
     let class_name = class_file.const_pool.get_utf8(this_class.name_idx)?;
 
@@ -85,7 +86,7 @@ fn insert_class(classes: &mut HashMap<String, Rc<RuntimeClass>>, class_file: cla
             }
         };
 
-        methods.push(Method2 {
+        methods.push(RuntimeMethod {
             name: name.bytes.clone(),
             descriptor: descriptor.bytes.clone(),
             code,
@@ -111,7 +112,7 @@ struct Frame {
     code: Vec<u8>,
 }
 
-fn create_thread(method: &Method2) -> Thread {
+fn create_thread(method: &RuntimeMethod) -> Thread {
     Thread {
         frames: vec![Frame {
             pc: 0,

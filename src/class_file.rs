@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Error};
-use std::collections::HashMap;
 use std::io::Read;
 
 impl ClassFile {
@@ -62,21 +61,21 @@ pub struct ClassFile {
 
 #[derive(Debug)]
 pub struct ConstPool {
-    consts: HashMap<u16, Const>,
+    consts: Vec<Const>,
 }
 
 impl ConstPool {
     fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error> {
         let const_pool_count = read_u16(reader)?;
-        let mut pool = HashMap::with_capacity(const_pool_count as usize - 1);
-        for idx in 1..const_pool_count {
-            pool.insert(idx, read_const(reader)?);
+        let mut pool = Vec::with_capacity(const_pool_count as usize - 1);
+        for _ in 1..const_pool_count {
+            pool.push(read_const(reader)?);
         }
         Ok(ConstPool { consts: pool })
     }
 
     pub fn get_utf8(&self, idx: u16) -> Result<&Utf8, Error> {
-        let const_item = self.consts.get(&idx).ok_or(anyhow!("const pool does not have item at index {}", idx))?;
+        let const_item = self.get_const(idx)?;
         match const_item {
             Const::Utf8(utf8) => Ok(utf8),
             _ => Err(anyhow!("expected utf8, got {:?}", const_item))
@@ -84,27 +83,31 @@ impl ConstPool {
     }
 
     pub fn get_class(&self, idx: u16) -> Result<&Class, Error> {
-        let const_item = self.consts.get(&idx).ok_or(anyhow!("const pool does not have item at index {}", idx))?;
+        let const_item = self.get_const(idx)?;
         match const_item {
             Const::Class(class) => Ok(class),
             _ => Err(anyhow!("expected class, got {:?}", const_item))
         }
     }
+
+    fn get_const(&self, idx: u16) -> Result<&Const, Error> {
+        self.consts.get(idx as usize - 1).ok_or(anyhow!("const pool does not have an item at index {}", idx))
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Const {
     Utf8(Utf8),
     Class(Class),
     Unimplemented,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Utf8 {
     pub bytes: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Class {
     pub name_idx: u16,
 }
@@ -192,6 +195,78 @@ fn read_length<R: Read>(reader: &mut R, length: usize) -> Result<Vec<u8>, Error>
     Ok(bytes)
 }
 
+#[cfg(test)]
+mod read_length_tests {
+    use super::*;
+
+    const BYTES: [u8; 5] = [0x10, 0x20, 0x30, 0x40, 0x50];
+    const EMPTY: [u8; 0] = [];
+
+    fn reader() -> &'static [u8] {
+        &BYTES as &[u8]
+    }
+
+    fn empty() -> &'static [u8] {
+        &EMPTY as &[u8]
+    }
+
+    #[test]
+    fn test_read_u8_ok() {
+        let result = read_u8(&mut reader());
+
+        assert_eq!(result.unwrap(), 0x10);
+    }
+
+    #[test]
+    fn test_read_u8_err() {
+        let result = read_u8(&mut empty());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_u16_ok() {
+        let result = read_u16(&mut reader());
+
+        assert_eq!(result.unwrap(), 0x1020);
+    }
+
+    #[test]
+    fn test_read_u16_err() {
+        let result = read_u16(&mut empty());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_u32_ok() {
+        let result = read_u32(&mut reader());
+
+        assert_eq!(result.unwrap(), 0x10203040);
+    }
+
+    #[test]
+    fn test_read_u32_err() {
+        let result = read_u32(&mut empty());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_length_ok() {
+        let result = read_length(&mut reader(), 3);
+
+        assert_eq!(result.unwrap(), vec![0x10, 0x20, 0x30]);
+    }
+
+    #[test]
+    fn test_read_length_err() {
+        let result = read_length(&mut empty(), 3);
+
+        assert!(result.is_err());
+    }
+}
+
 fn read_const<R: Read>(reader: &mut R) -> Result<Const, Error> {
     let tag = read_u8(reader)?;
     match tag {
@@ -213,25 +288,47 @@ fn read_const<R: Read>(reader: &mut R) -> Result<Const, Error> {
 }
 
 #[cfg(test)]
-mod tests {
+mod read_const_tests {
     use super::*;
     use std::io::Cursor;
 
     #[test]
-    fn test_read_bytes_ok() {
-        let bytes = vec![0x10, 0x20, 0x30, 0x40, 0x50];
+    fn read_utf8_ok() {
+        let reader: Vec<u8> = vec![
+            vec![0x01],
+            ("hello world".len() as u16).to_be_bytes().into(),
+            "hello world".bytes().collect()
+        ].into_iter().flatten().collect();
 
-        assert_eq!(read_u8(&mut Cursor::new(&bytes)).ok(), Some(0x10));
-        assert_eq!(read_u16(&mut Cursor::new(&bytes)).ok(), Some(0x1020));
-        assert_eq!(read_u32(&mut Cursor::new(&bytes)).ok(), Some(0x10203040));
-        assert_eq!(read_length(&mut Cursor::new(&bytes), 3).ok(), Some(vec![0x10, 0x20, 0x30]));
+        let utf8_const = read_const(&mut Cursor::new(reader));
+
+        assert_eq!(utf8_const.unwrap(), Const::Utf8(Utf8 { bytes: "hello world".to_string() }));
     }
 
     #[test]
-    fn test_read_bytes_error() {
-        assert!(read_u8(&mut Cursor::new([])).is_err());
-        assert!(read_u16(&mut Cursor::new([])).is_err());
-        assert!(read_u32(&mut Cursor::new([])).is_err());
-        assert!(read_length(&mut Cursor::new([]), 10).is_err());
+    fn read_utf8_err() {
+        let reader = vec![0x01, 0x0, 0x2];
+
+        let utf8_const = read_const(&mut Cursor::new(reader));
+
+        assert!(utf8_const.is_err());
+    }
+
+    #[test]
+    fn read_class_ok() {
+        let reader = vec![0x07, 0x23, 0x45];
+
+        let utf8_const = read_const(&mut Cursor::new(reader));
+
+        assert_eq!(utf8_const.unwrap(), Const::Class(Class { name_idx: 0x2345 }));
+    }
+
+    #[test]
+    fn read_class_err() {
+        let reader = vec![0x07];
+
+        let utf8_const = read_const(&mut Cursor::new(reader));
+
+        assert!(utf8_const.is_err());
     }
 }
