@@ -1,0 +1,9 @@
+[package]
+name = "robusta"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.90"
+assert_cmd = "2.0.16"
+zip = "2.2.0"
